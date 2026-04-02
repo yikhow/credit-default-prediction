@@ -1,0 +1,20 @@
+# Data
+data/cs-training.csv
+data/processed/
+
+# Models
+outputs/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.ipynb_checkpoints/
+
+# Anaconda
+.conda/
+*.egg-info/
+
+# OS
+.DS_Store
+Thumbs.db
