@@ -3,7 +3,9 @@ predict.py
 ----------
 Prediction functions for the
 Credit Default Prediction project.
-Loads trained model and preprocessors to score new borrower data.
+
+Loads the trained XGBoost model and fitted artefacts (scaler, imputer)
+to score a single new borrower and return a risk assessment.
 """
 
 import numpy as np
@@ -25,6 +27,9 @@ FEATURE_COLS = [
     'NumberOfDependents'
 ]
 
+# DebtRatio 99th percentile from training data (computed in preprocessing)
+DEBT_RATIO_CAP = 4985.11
+
 RISK_THRESHOLDS = {
     'LOW':    (0.00, 0.20),
     'MEDIUM': (0.20, 0.50),
@@ -32,15 +37,22 @@ RISK_THRESHOLDS = {
 }
 
 
-def load_artifacts(model_path: str, data_path: str) -> tuple:
-    """Load model, scaler, and imputer from disk."""
-    model_path = Path(model_path)
-    data_path  = Path(data_path)
+def load_artifacts(
+    model_path: str = "outputs/models",
+    artefact_path: str = "outputs/artefacts"
+) -> tuple:
+    """
+    Load trained XGBoost model, fitted scaler, and fitted imputer.
 
-    model   = joblib.load(model_path / "xgboost.pkl")
-    scaler  = joblib.load(data_path  / "scaler.pkl")
-    imputer = joblib.load(data_path  / "imputer.pkl")
+    Scaler and imputer are loaded from artefact_path (not data/processed)
+    as they are inference artefacts, not data files.
 
+    Returns:
+        model, scaler, imputer
+    """
+    model   = joblib.load(Path(model_path)   / "xgboost.pkl")
+    scaler  = joblib.load(Path(artefact_path) / "scaler.pkl")
+    imputer = joblib.load(Path(artefact_path) / "imputer.pkl")
     return model, scaler, imputer
 
 
@@ -50,32 +62,39 @@ def preprocess_input(
     scaler
 ) -> pd.DataFrame:
     """
-    Preprocess a single borrower's input data.
+    Apply the same preprocessing steps as the training pipeline
+    to a single borrower's input data.
+
+    Steps (must match 02_preprocessing.ipynb exactly):
+    1. Cap RevolvingUtilization at 1
+    2. Cap DebtRatio at training 99th percentile (4985.11)
+    3. Log1p transform MonthlyIncome
+    4. Impute missing values (median, fitted on training data)
+    5. Scale (StandardScaler, fitted on training data)
 
     Args:
-        data: dict of feature values
-        imputer: fitted SimpleImputer
-        scaler: fitted StandardScaler
+        data: dict of raw feature values (may contain None/NaN)
+        imputer: fitted SimpleImputer from training
+        scaler: fitted StandardScaler from training
 
     Returns:
-        Scaled feature DataFrame ready for prediction
+        Scaled feature DataFrame ready for model.predict_proba()
     """
     df = pd.DataFrame([data], columns=FEATURE_COLS)
 
-    # Cap outliers
+    # 1. Cap outliers
     df['RevolvingUtilizationOfUnsecuredLines'] = \
         df['RevolvingUtilizationOfUnsecuredLines'].clip(upper=1)
-    debt_cap = 3415  # 99th percentile from training data
-    df['DebtRatio'] = df['DebtRatio'].clip(upper=debt_cap)
+    df['DebtRatio'] = df['DebtRatio'].clip(upper=DEBT_RATIO_CAP)
 
-    # Log transform
+    # 2. Log transform
     df['MonthlyIncome'] = np.log1p(df['MonthlyIncome'])
 
-    # Impute missing values
+    # 3. Impute missing values (using median fitted on training data)
     impute_cols = ['MonthlyIncome', 'NumberOfDependents']
     df[impute_cols] = imputer.transform(df[impute_cols])
 
-    # Scale
+    # 4. Scale (using scaler fitted on training data)
     df_scaled = pd.DataFrame(
         scaler.transform(df),
         columns=FEATURE_COLS
@@ -85,7 +104,14 @@ def preprocess_input(
 
 
 def get_risk_label(probability: float) -> str:
-    """Convert default probability to risk label."""
+    """
+    Convert default probability to risk label.
+
+    Thresholds:
+        LOW:    [0.00, 0.20)
+        MEDIUM: [0.20, 0.50)
+        HIGH:   [0.50, 1.00]
+    """
     for label, (low, high) in RISK_THRESHOLDS.items():
         if low <= probability < high:
             return label
@@ -95,29 +121,30 @@ def get_risk_label(probability: float) -> str:
 def predict(
     data: dict,
     model_path: str = "outputs/models",
-    data_path: str  = "data/processed"
+    artefact_path: str = "outputs/artefacts"
 ) -> dict:
     """
     Predict default risk for a single borrower.
 
     Args:
-        data: dict of borrower feature values
-        model_path: path to saved models
-        data_path: path to saved preprocessors
+        data: dict of raw borrower feature values
+        model_path: directory containing trained model pkl files
+        artefact_path: directory containing scaler.pkl and imputer.pkl
 
     Returns:
-        dict with probability, risk label, and top risk factors
+        dict with:
+            - default_probability: float (0 to 1)
+            - risk_label: str ('LOW', 'MEDIUM', or 'HIGH')
+            - top_risk_factors: list of 3 most important features
     """
-    model, scaler, imputer = load_artifacts(model_path, data_path)
+    model, scaler, imputer = load_artifacts(model_path, artefact_path)
 
     X = preprocess_input(data, imputer, scaler)
     probability = model.predict_proba(X)[0][1]
     risk_label  = get_risk_label(probability)
 
-    # Identify top risk factors
-    importance = dict(zip(
-        FEATURE_COLS, model.feature_importances_
-    ))
+    # Top 3 features by model importance (static — same for all predictions)
+    importance = dict(zip(FEATURE_COLS, model.feature_importances_))
     top_factors = sorted(
         importance.items(), key=lambda x: x[1], reverse=True
     )[:3]
@@ -130,28 +157,27 @@ def predict(
 
 
 if __name__ == "__main__":
-    # Example prediction
     sample_borrower = {
-        'RevolvingUtilizationOfUnsecuredLines':   0.85,
-        'age':                                     32,
-        'NumberOfTime30-59DaysPastDueNotWorse':    2,
-        'DebtRatio':                               0.45,
-        'MonthlyIncome':                           4500,
-        'NumberOfOpenCreditLinesAndLoans':          8,
-        'NumberOfTimes90DaysLate':                  1,
-        'NumberRealEstateLoansOrLines':             0,
-        'NumberOfTime60-89DaysPastDueNotWorse':    0,
-        'NumberOfDependents':                       1,
+        'RevolvingUtilizationOfUnsecuredLines':  0.85,
+        'age':                                    32,
+        'NumberOfTime30-59DaysPastDueNotWorse':   2,
+        'DebtRatio':                              0.45,
+        'MonthlyIncome':                          4500,
+        'NumberOfOpenCreditLinesAndLoans':         8,
+        'NumberOfTimes90DaysLate':                 1,
+        'NumberRealEstateLoansOrLines':            0,
+        'NumberOfTime60-89DaysPastDueNotWorse':   0,
+        'NumberOfDependents':                      1,
     }
 
     result = predict(sample_borrower)
 
-    print("\n" + "="*45)
+    print("\n" + "=" * 45)
     print("  CREDIT DEFAULT RISK ASSESSMENT")
-    print("="*45)
+    print("=" * 45)
     print(f"  Default Probability : {result['default_probability']:.1%}")
     print(f"  Risk Label          : {result['risk_label']}")
     print(f"  Top Risk Factors    :")
     for factor in result['top_risk_factors']:
         print(f"    • {factor}")
-    print("="*45)
+    print("=" * 45)

@@ -82,7 +82,11 @@ if st.button("🔍 Assess Default Risk", use_container_width=True):
     }
 
     with st.spinner("Analysing borrower profile..."):
-        result = predict(borrower_data)
+        result = predict(
+            borrower_data,
+            model_path="outputs/models",
+            artefact_path="outputs/artefacts"
+        )
 
     prob  = result['default_probability']
     label = result['risk_label']
@@ -160,5 +164,5 @@ if st.button("🔍 Assess Default Risk", use_container_width=True):
 st.divider()
 st.caption(
     "Model: XGBoost | Trained on: Give Me Some Credit (Kaggle) | "
-    "AUC-ROC: 0.8664 | Recall: 0.7897"
+    "AUC-ROC: 0.8662 | Recall: 0.7852"
 )
